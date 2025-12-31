@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/Python-2.7%2F3.x-yellow?logo=python)
 ![License](https://img.shields.io/badge/License-GPLv2%2B-green)
 
-| ![Movie Search](https://github.com/ciefp/CiefpOpenSubtitles/blob/main/movies.jpg) |
+| ![Series Search](https://github.com/ciefp/CiefpOpenSubtitles/blob/main/series.jpg) |
 A powerful, lightweight subtitle search and download plugin for Enigma2-based set-top boxes (Vu+, Dreambox, etc.), supporting **OpenSubtitles.com (API)** and **OpenSubtitles.org (login)** — with **excellent series search capability**.
 
 > ✨ **Why choose CiefpOpenSubtitles?**  
