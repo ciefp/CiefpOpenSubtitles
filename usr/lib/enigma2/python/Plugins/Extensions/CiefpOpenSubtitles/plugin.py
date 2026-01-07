@@ -32,7 +32,7 @@ from Tools.BoundFunction import boundFunction
 from Tools.Directories import fileExists, pathExists, createDir, resolveFilename, SCOPE_PLUGINS
 
 # Versija plugina
-PLUGIN_VERSION = "1.3"  # TRI PRETRAGE: Standard, Smart, Advanced
+PLUGIN_VERSION = "1.4"  # TRI PRETRAGE: Standard, Smart, Advanced
 PLUGIN_PATH = resolveFilename(SCOPE_PLUGINS, "Extensions/CiefpOpenSubtitles/")
 CONFIG_DIR = "/etc/enigma2/ciefpopensubtitles/"
 
@@ -70,7 +70,7 @@ class SubDLAPI:
         self.session.mount("http://", adapter)
         
         self.headers = {
-            'User-Agent': 'Enigma2 SubDL Plugin/1.3',
+            'User-Agent': 'Enigma2 SubDL Plugin/1.4',
             'Accept': 'application/json'
         }
     
@@ -427,7 +427,7 @@ class SubDLAPI:
         
         try:
             headers = {
-                'User-Agent': 'Enigma2 SubDL Plugin/1.3',
+                'User-Agent': 'Enigma2 SubDL Plugin/1.4',
                 'Accept': '*/*',
                 'Referer': 'https://subdl.com/'
             }
@@ -1104,7 +1104,15 @@ class TitloviAPI:
             response3 = self.session.get(download_url, headers=self.headers, timeout=30)
 
             if response3.status_code == 200 and len(response3.content) > 100:
-                return self.process_download_content(response3.content, f"download_{prevod_id}")
+                result = self.process_download_content(response3.content, f"download_{prevod_id}")
+
+                # Dodaj metadata za identifikaciju
+                if isinstance(result, dict):
+                    result['prevod_id'] = prevod_id
+                    result['title'] = title
+                    result['source'] = 'titlovi'
+
+                return result
             else:
                 print(f"[TitloviAPI] Download failed: {response3.status_code}, size: {len(response3.content)}")
 
@@ -1190,8 +1198,11 @@ class TitloviAPI:
 
         # Proveri da li je ZIP
         if content[:2] == b'PK':
-            print(f"[TitloviAPI] ZIP file detected")
-            return self.extract_from_zip(content)
+            print(f"[TitloviAPI] ZIP file detected - extracting ALL SRT files")
+            result = self.extract_from_zip(content)
+
+            # Vrati kompletan result dict umesto samo fajla
+            return result
 
         # Proveri da li je direktan SRT/WebVTT
         if self.is_subtitle_content(content):
@@ -1214,7 +1225,7 @@ class TitloviAPI:
         return content  # Vrati šta god da je
 
     def extract_from_zip(self, zip_content):
-        """Ekstraktuj SRT iz ZIP fajla"""
+        """Ekstraktuj SRT iz ZIP fajla - NOVO: vraća SVE SRT fajlove kao listu"""
         try:
             from io import BytesIO
             from zipfile import ZipFile, BadZipFile
@@ -1225,8 +1236,42 @@ class TitloviAPI:
             file_list = zipfile.namelist()
             print(f"[TitloviAPI] ZIP contains {len(file_list)} files: {file_list}")
 
-            # Prioriteta: SRT > SUB > TXT > ASS > SSA > prvi fajl
-            extensions_order = ['.srt', '.sub', '.txt', '.ass', '.ssa', '.vtt']
+            # Pronađi SVE SRT fajlove
+            srt_files = []
+            for filename in file_list:
+                if filename.lower().endswith('.srt'):
+                    print(f"[TitloviAPI] Found SRT: {filename}")
+                    content = zipfile.read(filename)
+                    srt_files.append({
+                        'name': filename,
+                        'content': content,
+                        'size': len(content)
+                    })
+
+            # NOVO: Ako ima SRT fajlova, vrati LISTU
+            if srt_files:
+                print(f"[TitloviAPI] Found {len(srt_files)} SRT files")
+
+                # Za backward compatibility: vrati i najveći fajl
+                # Ali takođe vraćamo listu svih fajlova
+                largest_srt = max(srt_files, key=lambda x: x['size'])
+
+                # Log koji su svi SRT fajlovi
+                for srt in srt_files:
+                    print(f"[TitloviAPI] Available SRT: {srt['name']} ({srt['size']} bytes)")
+
+                print(f"[TitloviAPI] Returning {len(srt_files)} SRT files")
+
+                # Vrati tuple: (najveći_fajl, lista_svih_fajlova)
+                return {
+                    'largest': largest_srt['content'],
+                    'all_srt': srt_files,
+                    'is_zip': True,
+                    'file_count': len(srt_files)
+                }
+
+            # Ako nema SRT fajlova, probaj druge formate
+            extensions_order = ['.sub', '.txt', '.ass', '.ssa', '.vtt']
 
             for ext in extensions_order:
                 for filename in file_list:
@@ -1235,27 +1280,50 @@ class TitloviAPI:
                         content = zipfile.read(filename)
                         print(f"[TitloviAPI] Extracted {len(content)} bytes from {filename}")
 
-                        # Proveri da nije prazan
                         if len(content) > 10:
-                            return content
-                        else:
-                            print(f"[TitloviAPI] Warning: {filename} is too small ({len(content)} bytes)")
+                            return {
+                                'largest': content,
+                                'all_srt': [{'name': filename, 'content': content, 'size': len(content)}],
+                                'is_zip': True,
+                                'file_count': 1
+                            }
 
             # Ako nema tekstualnih fajlova, vrati prvi
             if file_list:
                 filename = file_list[0]
-                print(f"[TitloviAPI] No text files, extracting first file: {filename}")
-                return zipfile.read(filename)
+                print(f"[TitloviAPI] No text files, extracting first: {filename}")
+                content = zipfile.read(filename)
+                return {
+                    'largest': content,
+                    'all_srt': [{'name': filename, 'content': content, 'size': len(content)}],
+                    'is_zip': True,
+                    'file_count': 1
+                }
 
             print(f"[TitloviAPI] ZIP is empty")
-            return zip_content
+            return {
+                'largest': zip_content,
+                'all_srt': [],
+                'is_zip': True,
+                'file_count': 0
+            }
 
         except BadZipFile:
             print(f"[TitloviAPI] Not a valid ZIP file")
-            return zip_content
+            return {
+                'largest': zip_content,
+                'all_srt': [],
+                'is_zip': False,
+                'file_count': 0
+            }
         except Exception as e:
             print(f"[TitloviAPI] ZIP extraction error: {e}")
-            return zip_content
+            return {
+                'largest': zip_content,
+                'all_srt': [],
+                'is_zip': False,
+                'file_count': 0
+            }
 
     def is_subtitle_content(self, content):
         """Proveri da li je content subtitle fajl"""
@@ -1761,7 +1829,7 @@ class SubtitlesAPI:
         
         headers = {
             'Api-Key': self.opensubtitles_api_key,
-            'User-Agent': 'Enigma2 CiefpSubtitles v1.3',
+            'User-Agent': 'Enigma2 CiefpSubtitles v1.4',
             'Accept': 'application/json'
         }
         
@@ -1844,7 +1912,7 @@ class SubtitlesAPI:
         headers = {
             'Api-Key': self.opensubtitles_api_key,
             'Content-Type': 'application/json',
-            'User-Agent': 'Enigma2 CiefpSubtitles v1.3',
+            'User-Agent': 'Enigma2 CiefpSubtitles v1.4',
             'Accept': 'application/json'
         }
         
@@ -1900,14 +1968,14 @@ class OpenSubtitlesConfigScreen(ConfigListScreen, Screen):
     """Ekran za konfiguraciju plugina - DODATE SUBDL OPCIJE"""
     
     skin = """
-    <screen position="center,center" size="1600,800" title="Subtitles Configuration v1.3">
-    <widget name="config" position="50,50" size="1100,550" scrollbarMode="showOnDemand" />
+    <screen position="center,center" size="1600,800" title="Subtitles Configuration v1.4">
+    <widget name="config" position="50,50" size="1100,650" scrollbarMode="showOnDemand" />
     
     <!-- Dugmad -->
-    <widget source="key_red" render="Label" position="50,750" size="160,50" backgroundColor="#9f1313" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
-    <widget source="key_green" render="Label" position="230,750" size="160,50" backgroundColor="#1f771f" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
-    <widget source="key_yellow" render="Label" position="410,750" size="160,50" backgroundColor="#a08500" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
-    <widget source="key_blue" render="Label" position="590,750" size="160,50" backgroundColor="#18188b" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
+    <widget source="key_red" render="Label" position="50,700" size="160,50" backgroundColor="#9f1313" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
+    <widget source="key_green" render="Label" position="230,700" size="160,50" backgroundColor="#1f771f" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
+    <widget source="key_yellow" render="Label" position="410,700" size="160,50" backgroundColor="#a08500" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
+    <widget source="key_blue" render="Label" position="590,700" size="160,50" backgroundColor="#18188b" foregroundColor="white" font="Regular;28" halign="center" valign="center" />
     
     <!-- Slika sa desne strane -->
     <widget name="background"
@@ -1953,7 +2021,7 @@ class OpenSubtitlesConfigScreen(ConfigListScreen, Screen):
         self.onLayoutFinish.append(self.layoutFinished)
     
     def layoutFinished(self):
-        self.setTitle("Subtitles Configuration v1.3")
+        self.setTitle("Subtitles Configuration v1.4")
     
     def createSetup(self):
         """Kreiraj listu konfiguracija - DODATE SUBDL OPCIJE"""
@@ -2017,9 +2085,35 @@ class OpenSubtitlesConfigScreen(ConfigListScreen, Screen):
         
         self.download_info = ConfigNothing()
         self.list.append(getConfigListEntry("SubDL: Unlimited, OpenSubtitles: 5/day", self.download_info))
+
+        self.debug_files_info = ConfigNothing()
+        self.list.append(getConfigListEntry("--- Debug Files ---", self.debug_files_info))
+
+        self.clear_debug_files = ConfigYesNo(default=False)
+        self.list.append(getConfigListEntry("Clear debug files on exit:", self.clear_debug_files))
         
         self["config"].list = self.list
         self["config"].l.setList(self.list)
+
+    def clear_debug_files_func(self):
+        """Obriši sve debug HTML fajlove"""
+        try:
+            import glob, os
+            debug_files = glob.glob("/tmp/titlovi_*.html")
+            debug_files += glob.glob("/tmp/subdl_*.html")
+
+            deleted_count = 0
+            for f in debug_files:
+                try:
+                    os.remove(f)
+                    deleted_count += 1
+                except:
+                    pass
+
+            return deleted_count
+        except Exception as e:
+            print(f"[CONFIG] Error clearing debug files: {e}")
+            return 0
     
     def editApiKeys(self):
         """Otvaranje ekrana za editovanje API ključeva"""
@@ -2089,7 +2183,7 @@ OpenSubtitles.com:
 • VIP: 1000 downloads/day
 • Resets based on account time
 
-NEW in v1.3:
+NEW in v1.4:
 • THREE search methods
 • SMART search (auto-tries all)
 • Shows which method worked
@@ -2158,6 +2252,14 @@ These options require SubDL API key to work."""
             self.plugin.api.config = self.config_obj
             self.plugin.api.update_api_keys()
             self.close(True)
+        # Dodaj na KRAJ keySave metode (posle čuvanja settings-a)
+        if self.clear_debug_files.value:
+            deleted = self.clear_debug_files_func()
+            if deleted > 0:
+                self.session.open(MessageBox,
+                                 f"Cleared {deleted} debug files!",
+                                 MessageBox.TYPE_INFO,
+                                 timeout=3)
         else:
             self.session.open(MessageBox, 
                             "Error saving configuration!", 
@@ -2361,7 +2463,7 @@ class OpenSubtitlesSearchScreen(Screen):
     """Ekran za STANDARD pretragu titlova filmova"""
 
     skin = """
-    <screen position="center,center" size="1600,800" title="Standard Search v1.3" backgroundColor="#000000">
+    <screen position="center,center" size="1600,800" title="Standard Search v1.4" backgroundColor="#000000">
         <eLabel position="0,0" size="1600,800" backgroundColor="#000000" zPosition="-10" />
 
         <widget name="input_label" position="50,30" size="200,40" font="Regular;28" foregroundColor="#ffffff" valign="center" />
@@ -2376,9 +2478,9 @@ class OpenSubtitlesSearchScreen(Screen):
             transparent="0"
             halign="left" zPosition="2" />
 
-        <widget name="results" position="50,100" size="1100,550" enableWrapAround="1" scrollbarMode="showOnDemand" 
+        <widget name="results" position="50,100" size="1100,560" enableWrapAround="1" scrollbarMode="showOnDemand" 
                 transparent="0" backgroundColor="#111111" foregroundColor="#ffffff" 
-                itemHeight="50" font="Regular;24" />
+                itemHeight="40" font="Regular;24" />
 
         <eLabel position="50,670" size="700,30" backgroundColor="#333333" />
         <widget name="status" position="60,675" size="680,20" 
@@ -2788,10 +2890,10 @@ Check:
             self["results"].pageDown()
 
 class OpenSubtitlesSmartSearchScreen(Screen):
-    """Ekran za SMART pretragu titlova - NOVO U v1.3"""
+    """Ekran za SMART pretragu titlova - NOVO U v1.4"""
 
     skin = """
-    <screen position="center,center" size="1600,800" title="Smart Search v1.3" backgroundColor="#000000">
+    <screen position="center,center" size="1600,800" title="Smart Search v1.4" backgroundColor="#000000">
         <eLabel position="0,0" size="1200,800" backgroundColor="#000000" zPosition="-10" />
 
         <widget name="header" position="50,20" size="1200,50" font="Regular;30" 
@@ -2804,12 +2906,12 @@ class OpenSubtitlesSmartSearchScreen(Screen):
         <widget name="input" position="270,85" size="680,30"
                 font="Regular;28" foregroundColor="#ffff00" backgroundColor="#222222" zPosition="2" />
 
-        <widget name="results" position="50,150" size="1100,500" enableWrapAround="1" 
+        <widget name="results" position="50,150" size="1100,520" enableWrapAround="1" 
                 scrollbarMode="showOnDemand" backgroundColor="#111111" foregroundColor="#ffffff" 
-                itemHeight="48" font="Regular;24" />
+                itemHeight="40" font="Regular;24" />
 
-        <eLabel position="50,670" size="700,30" backgroundColor="#333333" />
-        <widget name="status" position="60,675" size="680,20" 
+        <eLabel position="50,680" size="700,30" backgroundColor="#333333" />
+        <widget name="status" position="60,685" size="680,20" 
                 font="Regular;22" foregroundColor="#ffff00" transparent="1" />
 
         <!-- Dugmad -->
@@ -2870,7 +2972,7 @@ class OpenSubtitlesSmartSearchScreen(Screen):
     
     def get_info_text(self):
         """Vraća tekst sa informacijama za smart search"""
-        return """SMART SEARCH v1.3
+        return """SMART SEARCH v1.4
 
 Search Order:
 1. IMDB ID (best)
@@ -3156,7 +3258,7 @@ class OpenSubtitlesAdvancedSearchScreen(Screen):
     """Ekran za naprednu pretragu - ADVANCED SEARCH"""
     
     skin = """
-    <screen position="center,center" size="1600,800" title="Advanced Search v1.3">
+    <screen position="center,center" size="1600,800" title="Advanced Search v1.4">
         <eLabel position="0,0" size="1600,800" backgroundColor="#000000" zPosition="-10" />
         
         <widget name="header" position="50,30" size="1200,50" font="Regular;32" 
@@ -3173,9 +3275,9 @@ class OpenSubtitlesAdvancedSearchScreen(Screen):
         <widget name="query" position="270,165" size="680,30"
                 font="Regular;28" foregroundColor="#ffff00" backgroundColor="#222222" zPosition="2" />
         
-        <widget name="results" position="50,230" size="1100,450" enableWrapAround="1" 
+        <widget name="results" position="50,215" size="1100,480" enableWrapAround="1" 
                 scrollbarMode="showOnDemand" backgroundColor="#111111" foregroundColor="#ffffff" 
-                itemHeight="50" font="Regular;24" />
+                itemHeight="40" font="Regular;24" />
         
         <eLabel position="50,700" size="700,30" backgroundColor="#333333" />
         <widget name="status" position="60,705" size="680,20" 
@@ -3560,7 +3662,7 @@ Check:
 
 class OpenSubtitlesSeriesSearchScreen(Screen):
     skin = """<screen position="center,center" size="1600,800"
-        title="Search Series Subtitles v1.3"
+        title="Search Series Subtitles v1.4"
         backgroundColor="#000000">
 
         <!-- Background -->
@@ -3616,12 +3718,12 @@ class OpenSubtitlesSeriesSearchScreen(Screen):
 
         <!-- Results -->
         <widget name="results"
-            position="50,215" size="1100,470"
+            position="50,215" size="1100,480"
             enableWrapAround="1"
             scrollbarMode="showOnDemand"
             backgroundColor="#111111"
             foregroundColor="#ffffff"
-            itemHeight="47"
+            itemHeight="40"
             font="Regular;22"
             zPosition="1" />
 
@@ -3673,7 +3775,7 @@ class OpenSubtitlesSeriesSearchScreen(Screen):
         self.session = session
         self.plugin = plugin
 
-        self["header"] = Label("SERIES SUBTITLES SEARCH v1.3")
+        self["header"] = Label("SERIES SUBTITLES SEARCH v1.4")
         self["series_label"] = Label("Series:")
         self["series_input"] = Label("")
         self["season_label"] = Label("Season:")
@@ -3983,12 +4085,12 @@ class TitloviSearchScreen(Screen):
         <widget name="input" position="270,105" size="680,30"
                 font="Regular;28" foregroundColor="#ffff00" backgroundColor="#222222" zPosition="2" />
 
-        <widget name="results" position="50,170" size="1100,500" enableWrapAround="1" 
+        <widget name="results" position="50,170" size="1100,520" enableWrapAround="1" 
                 scrollbarMode="showOnDemand" backgroundColor="#111111" foregroundColor="#ffffff" 
-                itemHeight="50" font="Regular;24" />
+                itemHeight="40" font="Regular;24" />
 
-        <eLabel position="50,690" size="700,30" backgroundColor="#333333" />
-        <widget name="status" position="60,695" size="680,20" 
+        <eLabel position="50,695" size="700,30" backgroundColor="#333333" />
+        <widget name="status" position="60,700" size="680,20" 
                 font="Regular;22" foregroundColor="#ffff00" transparent="1" />
 
         <!-- Dugmad -->
@@ -4068,7 +4170,7 @@ class TitloviSearchScreen(Screen):
             self.updateDisplay()
             if cleaned_text:
                 self.doSearch()
-
+                
     def doSearch(self):
         """Izvrši pretragu na Titlovi.com"""
         query = self["input"].getText().strip()
@@ -4099,29 +4201,32 @@ class TitloviSearchScreen(Screen):
             language = result.get('language', 'Unknown')
             downloads = result.get('downloads', 0)
 
-            # Formatiraj prikaz
+            # NOVO: Formatiraj prikaz SA JEZIKOM
             display_text = f"{idx}. {title}"
             if year:
                 display_text += f" ({year})"
 
+            # NOVO: Dodaj jezik jasno
+            language_display = self.get_language_display(language)
+            display_text += f" - {language_display}"
+
             # Skrati ako je predugo
-            if len(display_text) > 45:
-                display_text = display_text[:42] + "..."
-
-            # Dodaj informacije u zagradi
-            info_parts = []
-
-            # Jezik
-            lang_short = language[:3] if language else '???'
-            info_parts.append(f"Lang: {lang_short}")
+            if len(display_text) > 100:
+                display_text = display_text[:80] + "..."
 
             # Download broj
+            info_parts = []
             if downloads > 0:
                 if downloads >= 1000:
-                    dl_str = f"{downloads / 1000:.1f}K"
+                    dl_str = f"↓{downloads / 1000:.1f}K"
                 else:
-                    dl_str = str(downloads)
-                info_parts.append(f"↓{dl_str}")
+                    dl_str = f"↓{downloads}"
+                info_parts.append(dl_str)
+
+            # Dodaj release info ako postoji
+            release = result.get('release_info', '')
+            if release and len(release) < 20:
+                display_text += f" - {release}"
 
             if info_parts:
                 display_text += f" ({' | '.join(info_parts)})"
@@ -4179,46 +4284,211 @@ Try:
             self.session.open(MessageBox, error_msg, MessageBox.TYPE_ERROR)
 
     def saveSubtitle(self, content, result):
-        """Sačuvaj preuzeti titl"""
+        """Sačuvaj preuzeti titl - POBOLJŠANO: ekstraktuj i sačuvaj SVE SRT fajlove sa ORIGINALNIM nazivima"""
         settings = self.plugin.api.config.read_settings()
         save_path = settings.get('save_path', '/media/hdd/subtitles/')
 
-        # Kreiraj naziv fajla
+        # Kreiraj bazni naziv (samo za log)
         title = result.get('title', 'subtitle').replace(' ', '_')
-        title = re.sub(r'[^\w\-_]', '', title)
-        language = result.get('language_code', 'srp')
+        title = re.sub(r'[^\w\-_]', '', title)[:40]
         timestamp = int(time.time())
-
-        # Odredi ekstenziju
-        ext = '.srt'
-        if isinstance(content, bytes):
-            if content.startswith(b'PK'):
-                ext = '.zip'
-            elif content.startswith(b'WEBVTT'):
-                ext = '.vtt'
-
-        filename = f"Titlovi_{title}_{language}_{timestamp}{ext}"
-        full_path = os.path.join(save_path, filename)
 
         try:
             if not pathExists(save_path):
                 createDir(save_path)
 
-            if isinstance(content, str):
-                content = content.encode('utf-8')
+            saved_files = []  # Lista sačuvanih fajlova
+            file_count = 0
 
-            with open(full_path, 'wb') as f:
-                f.write(content)
+            # PROVERA: Da li je rezultat dict sa više fajlova (novi format)?
+            if isinstance(content, dict) and 'is_zip' in content and content['is_zip']:
+                print(f"[TITLOVI SEARCH] Multi-file ZIP detected with {content.get('file_count', 0)} files")
 
-            self["status"].setText(f"Downloaded: {filename}")
-            self.session.open(MessageBox,
-                              f"Subtitle downloaded from Titlovi.com!\nSaved to: {full_path}",
-                              MessageBox.TYPE_INFO,
-                              timeout=5)
+                # Sačuvaj SVE SRT fajlove sa ORIGINALNIM nazivima
+                if 'all_srt' in content and content['all_srt']:
+                    for srt_info in content['all_srt']:
+                        try:
+                            srt_filename = srt_info['name']
+                            srt_content = srt_info['content']
+
+                            # Koristi ORIGINALNI naziv fajla
+                            filename = os.path.basename(srt_filename)
+
+                            # Očisti samo opasne karaktere
+                            filename = re.sub(r'[\\/*?:"<>|]', '_', filename)
+
+                            full_path = os.path.join(save_path, filename)
+
+                            # Proveri da li fajl već postoji
+                            counter = 1
+                            name_part, ext = os.path.splitext(filename)
+                            while os.path.exists(full_path):
+                                filename = f"{name_part}_{counter}{ext}"
+                                full_path = os.path.join(save_path, filename)
+                                counter += 1
+
+                            # Sačuvaj fajl
+                            with open(full_path, 'wb') as f:
+                                f.write(srt_content)
+
+                            saved_files.append(filename)
+                            file_count += 1
+                            print(f"[TITLOVI SEARCH] Saved: {filename} ({len(srt_content)} bytes)")
+
+                        except Exception as e:
+                            print(f"[TITlovi SEARCH] Error saving {srt_filename}: {e}")
+
+                # NE čuvaj dodatni "largest" fajl - to je duplikat
+                print(f"[TITLOVI SEARCH] Skipping duplicate 'largest' file")
+
+            # STARO PONAŠANJE: direktan fajl ili ZIP bez novog formata
+            elif isinstance(content, bytes):
+                # Proveri da li je ZIP
+                if content[:2] == b'PK':
+                    print(f"[TITLOVI SEARCH] Old format ZIP, extracting manually...")
+
+                    try:
+                        from io import BytesIO
+                        from zipfile import ZipFile
+
+                        zipfile = ZipFile(BytesIO(content))
+
+                        # Pronađi SVE SRT fajlove
+                        for filename in zipfile.namelist():
+                            if filename.lower().endswith('.srt'):
+                                srt_content = zipfile.read(filename)
+
+                                # Koristi originalni naziv
+                                safe_filename = os.path.basename(filename)
+                                safe_filename = re.sub(r'[\\/*?:"<>|]', '_', safe_filename)
+
+                                full_path = os.path.join(save_path, safe_filename)
+
+                                # Proveri da li postoji
+                                counter = 1
+                                name_part, ext = os.path.splitext(safe_filename)
+                                while os.path.exists(full_path):
+                                    safe_filename = f"{name_part}_{counter}{ext}"
+                                    full_path = os.path.join(save_path, safe_filename)
+                                    counter += 1
+
+                                # Sačuvaj
+                                with open(full_path, 'wb') as f:
+                                    f.write(srt_content)
+
+                                saved_files.append(safe_filename)
+                                file_count += 1
+                                print(f"[TITLOVI SEARCH] Saved: {safe_filename}")
+
+                    except Exception as e:
+                        print(f"[TITLOVI SEARCH] Error extracting old ZIP: {e}")
+
+                        # Fallback: sačuvaj kao ZIP sa originalnim nazivom
+                        zip_filename = f"subtitles_{timestamp}.zip"
+                        zip_path = os.path.join(save_path, zip_filename)
+
+                        with open(zip_path, 'wb') as f:
+                            f.write(content)
+
+                        saved_files.append(zip_filename)
+                        file_count = 1
+
+                else:
+                    # Direktan SRT fajl - kreiraj smislen naziv
+                    print(f"[TITLOVI SEARCH] Direct subtitle file")
+
+                    # Odredi ekstenziju
+                    if content.startswith(b'WEBVTT'):
+                        ext = '.vtt'
+                    else:
+                        ext = '.srt'
+
+                    # Kreiraj naziv baziran na naslovu
+                    safe_title = re.sub(r'[^\w\-_]', '_', title)[:30]
+                    filename = f"{safe_title}_{timestamp}{ext}"
+                    full_path = os.path.join(save_path, filename)
+
+                    with open(full_path, 'wb') as f:
+                        f.write(content)
+
+                    saved_files.append(filename)
+                    file_count = 1
+
+            else:
+                # String content - kreiraj naziv
+                print(f"[TITLOVI SEARCH] String content")
+
+                safe_title = re.sub(r'[^\w\-_]', '_', title)[:30]
+                filename = f"{safe_title}_{timestamp}.srt"
+                full_path = os.path.join(save_path, filename)
+
+                if isinstance(content, str):
+                    content = content.encode('utf-8')
+
+                with open(full_path, 'wb') as f:
+                    f.write(content)
+
+                saved_files.append(filename)
+                file_count = 1
+
+            # Prikaži rezultat SA ORIGINALNIM NAZIVIMA
+            if file_count > 1:
+                self["status"].setText(f"Saved {file_count} files")
+
+                # Pripremi poruku - prikaži originalne nazive
+                if file_count <= 5:
+                    file_list_text = "\n".join([f"• {f}" for f in saved_files])
+                else:
+                    file_list_text = "\n".join([f"• {f}" for f in saved_files[:3]])
+                    file_list_text += f"\n• ... and {file_count - 3} more"
+
+                # Dodaj putanju
+                from os.path import getsize
+                total_size = sum(os.path.getsize(os.path.join(save_path, f)) for f in saved_files)
+                size_mb = total_size / (1024 * 1024)
+
+                self.session.open(MessageBox,
+                                  f"✓ Download successful!\n\n"
+                                  f"Saved {file_count} files ({size_mb:.2f} MB):\n"
+                                  f"{file_list_text}\n\n"
+                                  f"Location: {save_path}",
+                                  MessageBox.TYPE_INFO,
+                                  timeout=8)
+
+                # Takođe prikaži u log-u
+                print(f"[TITLOVI SEARCH] Successfully saved {file_count} files:")
+                for f in saved_files:
+                    file_path = os.path.join(save_path, f)
+                    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                    print(f"  - {f} ({file_size} bytes)")
+
+            elif file_count == 1:
+                self["status"].setText(f"Downloaded: {saved_files[0]}")
+
+                # Prikaži veličinu fajla
+                file_path = os.path.join(save_path, saved_files[0])
+                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                size_kb = file_size / 1024
+
+                self.session.open(MessageBox,
+                                  f"Subtitle downloaded successfully!\n\n"
+                                  f"File: {saved_files[0]}\n"
+                                  f"Size: {size_kb:.1f} KB\n\n"
+                                  f"Location: {save_path}",
+                                  MessageBox.TYPE_INFO,
+                                  timeout=5)
+            else:
+                self["status"].setText("Error: No files saved!")
+                self.session.open(MessageBox,
+                                  "Error: Could not save any files!",
+                                  MessageBox.TYPE_ERROR)
 
         except Exception as e:
             print(f"[TITLOVI SEARCH] Error saving subtitle: {e}")
-            self["status"].setText(f"Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+            self["status"].setText(f"Error: {str(e)[:30]}")
             self.session.open(MessageBox,
                               f"Error saving subtitle: {str(e)}",
                               MessageBox.TYPE_ERROR)
@@ -4240,7 +4510,36 @@ Try:
     def right(self):
         if self["results"].getList():
             self["results"].pageDown()
-
+    
+    # DODAJ OVDE ↓↓↓
+    def get_language_display(self, language):
+        """Vrati lep prikaz jezika"""
+        lang_map = {
+            'srpski': 'SRP', 'српски': 'SRP', 'serbian': 'SRP',
+            'hrvatski': 'HRV', 'croatian': 'HRV',
+            'bosanski': 'BOS', 'bosnian': 'BOS',
+            'slovenački': 'SLV', 'slovenian': 'SLV',
+            'makedonski': 'MKD', 'macedonian': 'MKD',
+            'bugarski': 'BUL', 'bulgarian': 'BUL',
+            'crnogorski': 'MNE', 'montenegrin': 'MNE',
+            'engleski': 'ENG', 'english': 'ENG'
+        }
+        
+        if not language or language == 'Unknown':
+            return '???'
+        
+        lang_lower = language.lower()
+        
+        # Pokušaj prvo mapiranje
+        for key, code in lang_map.items():
+            if key in lang_lower:
+                return code
+        
+        # Ako nema mapiranja, vrati originalni jezik (skraćeno)
+        if len(language) > 12:
+            return language[:10] + "..."
+        
+        return language
 
 class TitloviAdvancedSearchScreen(Screen):
     """Ekran za NAPREDNU pretragu na Titlovi.com - Direktna integracija sa titlovi.com naprednom pretragom"""
@@ -4269,62 +4568,62 @@ class TitloviAdvancedSearchScreen(Screen):
         <!-- JEZIK -->
         <widget name="language_label" position="50,220" size="250,40" 
                 font="Regular;28" foregroundColor="#ffffff" valign="center" />
-        <widget name="language" position="320,220" size="300,40" 
+        <widget name="language" position="320,220" size="200,40" 
                 font="Regular;28" foregroundColor="#ffff00" />
 
         <!-- TIP -->
-        <widget name="type_label" position="50,280" size="250,40" 
+        <widget name="type_label" position="550,220" size="250,40" 
                 font="Regular;28" foregroundColor="#ffffff" valign="center" />
-        <widget name="type" position="320,280" size="300,40" 
+        <widget name="type" position="820,220" size="200,40" 
                 font="Regular;28" foregroundColor="#ffff00" />
 
         <!-- SEZONA -->
-        <widget name="season_label" position="50,340" size="250,40" 
+        <widget name="season_label" position="50,280" size="250,40" 
                 font="Regular;28" foregroundColor="#ffffff" valign="center" />
-        <eLabel position="320,340" size="200,40" backgroundColor="#222222" />
-        <widget name="season_input" position="330,345" size="180,30"
+        <eLabel position="320,280" size="200,40" backgroundColor="#222222" />
+        <widget name="season_input" position="330,285" size="180,30"
                 font="Regular;28" foregroundColor="#ffff00" backgroundColor="#222222" zPosition="2" />
 
         <!-- EPIZODA -->
-        <widget name="episode_label" position="550,340" size="250,40" 
+        <widget name="episode_label" position="550,280" size="250,40" 
                 font="Regular;28" foregroundColor="#ffffff" valign="center" />
-        <eLabel position="820,340" size="200,40" backgroundColor="#222222" />
-        <widget name="episode_input" position="830,345" size="180,30"
+        <eLabel position="820,280" size="200,40" backgroundColor="#222222" />
+        <widget name="episode_input" position="830,285" size="180,30"
                 font="Regular;28" foregroundColor="#ffff00" backgroundColor="#222222" zPosition="2" />
 
         <!-- GODINA -->
-        <widget name="year_label" position="50,400" size="250,40" 
+        <widget name="year_label" position="50,340" size="250,40" 
                 font="Regular;28" foregroundColor="#ffffff" valign="center" />
-        <eLabel position="320,400" size="200,40" backgroundColor="#222222" />
-        <widget name="year_input" position="330,405" size="180,30"
+        <eLabel position="320,340" size="200,40" backgroundColor="#222222" />
+        <widget name="year_input" position="330,345" size="180,30"
                 font="Regular;28" foregroundColor="#ffff00" backgroundColor="#222222" zPosition="2" />
 
         <!-- SORTIRANJE -->
-        <widget name="sort_label" position="550,400" size="250,40" 
+        <widget name="sort_label" position="550,340" size="250,40" 
                 font="Regular;28" foregroundColor="#ffffff" valign="center" />
-        <widget name="sort" position="820,400" size="300,40" 
+        <widget name="sort" position="820,340" size="300,40" 
                 font="Regular;28" foregroundColor="#ffff00" />
 
         <!-- REZULTATI -->
-        <widget name="results" position="50,470" size="1100,330" enableWrapAround="1" 
+        <widget name="results" position="50,410" size="1100,360" enableWrapAround="1" 
                 scrollbarMode="showOnDemand" backgroundColor="#111111" foregroundColor="#ffffff" 
-                itemHeight="45" font="Regular;22" />
+                itemHeight="40" font="Regular;22" />
 
         <!-- STATUS -->
-        <eLabel position="50,820" size="1100,30" backgroundColor="#333333" />
-        <widget name="status" position="60,825" size="1080,20" 
+        <eLabel position="50,780" size="1100,30" backgroundColor="#333333" />
+        <widget name="status" position="60,785" size="1080,20" 
                 font="Regular;22" foregroundColor="#ffff00" transparent="1" />
 
         <!-- DUGMAD -->
-        <eLabel text="Exit" position="50,865" size="200,45" font="Regular;26" 
+        <eLabel text="Exit" position="50,825" size="200,45" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#9f1313" halign="center" valign="center" />
-        <eLabel text="Search" position="280,865" size="200,45" font="Regular;26" 
+        <eLabel text="Search" position="280,825" size="200,45" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#1f771f" halign="center" valign="center" />
-        <eLabel text="Keyboard" position="510,865" size="200,45" font="Regular;26" 
+        <eLabel text="Keyboard" position="510,825" size="200,45" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#a08500" halign="center" valign="center" />
-        <eLabel text="Download" position="740,865" size="200,45" font="Regular;26" 
+        <eLabel text="Download" position="740,825" size="200,45" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#18188b" halign="center" valign="center" />
-        <eLabel text="Reset" position="970,865" size="200,45" font="Regular;26" 
+        <eLabel text="Reset" position="970,825" size="200,45" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#a52a8a" halign="center" valign="center" />
 
         <widget name="background" position="1200,0" size="400,900" 
@@ -4625,8 +4924,8 @@ class TitloviAdvancedSearchScreen(Screen):
                 display_text += f" [S{season:02d}]"
 
             # Skrati ako je predugo
-            if len(display_text) > 50:
-                display_text = display_text[:47] + "..."
+            if len(display_text) > 100:
+                display_text = display_text[:80] + "..."
 
             # Dodaj detalje u zagradama
             info_parts = []
@@ -4965,7 +5264,7 @@ class SubtitleFileExplorer(Screen):
                 foregroundColor="#ffffff" backgroundColor="#1f771f" halign="center" valign="center" />
         <eLabel text="Delete" position="510,720" size="200,50" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#a08500" halign="center" valign="center" />
-        <eLabel text="Refresh" position="740,720" size="200,50" font="Regular;26" 
+        <eLabel text="Multi Select" position="740,720" size="200,50" font="Regular;26" 
                 foregroundColor="#ffffff" backgroundColor="#18188b" halign="center" valign="center" />
 
         <widget name="background" position="1200,0" size="400,800" 
@@ -4987,15 +5286,16 @@ class SubtitleFileExplorer(Screen):
         self["files"] = MenuList([])
         self.file_list = []  # Lista fajlova sa punim putevima
         self.current_dir = ""
-
+        self.selected_files = set()  # NOVO: set za multi-selection
+        self.multi_select_mode = False  # NOVO: mod za višestruko selekciju
         self["actions"] = ActionMap(["ColorActions", "SetupActions", "MovieSelectionActions"],
                                     {
                                         "red": self.close,
                                         "green": self.selectFile,
                                         "yellow": self.deleteFile,
-                                        "blue": self.refreshFiles,
+                                        "blue": self.toggleMultiSelect,  # NOVO
                                         "cancel": self.close,
-                                        "ok": self.selectFile,
+                                        "ok": self.toggleSelection,  # PROMENJENO
                                         "up": self.up,
                                         "down": self.down,
                                         "left": self.left,
@@ -5003,7 +5303,7 @@ class SubtitleFileExplorer(Screen):
                                     }, -2)
 
         self.onLayoutFinish.append(self.loadFiles)
-
+        
     def loadFiles(self):
         """Učitaj fajlove iz config foldera"""
         settings = self.plugin.api.config.read_settings()
@@ -5015,6 +5315,7 @@ class SubtitleFileExplorer(Screen):
         if not pathExists(save_path):
             self["status"].setText("Folder does not exist!")
             self["path"].setText(save_path)
+            self.updateFileListDisplay()  # osveži UI (file_list je prazna → bez efekta, ali čist)
             return
 
         self["path"].setText(save_path)
@@ -5022,13 +5323,12 @@ class SubtitleFileExplorer(Screen):
 
         try:
             import os
-            import time
             from datetime import datetime
 
             # Pronađi sve subtitle fajlove
             subtitle_extensions = ['.srt', '.sub', '.ass', '.ssa', '.vtt', '.txt']
 
-            files = []
+            # Resetuj listu — bitno za reset selekcije
             self.file_list = []
 
             for filename in sorted(os.listdir(save_path), key=lambda x: os.path.getmtime(os.path.join(save_path, x)),
@@ -5043,25 +5343,6 @@ class SubtitleFileExplorer(Screen):
                         mod_time = os.path.getmtime(full_path)
                         mod_date = datetime.fromtimestamp(mod_time).strftime('%d.%m.%Y %H:%M')
 
-                        # Formatiraj veličinu
-                        if file_size < 1024:
-                            size_str = f"{file_size} B"
-                        elif file_size < 1024 * 1024:
-                            size_str = f"{file_size / 1024:.1f} KB"
-                        else:
-                            size_str = f"{file_size / (1024 * 1024):.1f} MB"
-
-                        # Skrati naziv ako je predug
-                        display_name = filename
-                        if len(filename) > 40:
-                            name, ext = os.path.splitext(filename)
-                            display_name = name[:37] + "..." + ext
-
-                        # Kreiraj prikaz
-                        display_text = f"{display_name}"
-                        display_text += f" ({size_str}, {mod_date})"
-
-                        files.append(display_text)
                         self.file_list.append({
                             'path': full_path,
                             'name': filename,
@@ -5069,17 +5350,19 @@ class SubtitleFileExplorer(Screen):
                             'date': mod_date
                         })
 
-            if files:
-                self["files"].setList(files)
-                self["status"].setText(f"Found {len(files)} subtitle files")
+            # Uvek osvežavamo prikaz preko jedinstvene funkcije
+            self.updateFileListDisplay()
+
+            if self.file_list:
+                self["status"].setText(f"Found {len(self.file_list)} subtitle files")
             else:
-                self["files"].setList(["No subtitle files found"])
                 self["status"].setText("No subtitle files in folder")
 
         except Exception as e:
             print(f"[FILE EXPLORER] Error loading files: {e}")
             self["status"].setText(f"Error: {str(e)[:50]}")
-            self["files"].setList(["Error loading files"])
+            self.file_list = []  # eksplicitno resetujemo
+            self.updateFileListDisplay()  # osveži prikaz (prazna lista → "No files", bez ✓)
 
     def selectFile(self):
         """Selektuj fajl za dodatne opcije"""
@@ -5121,25 +5404,154 @@ class SubtitleFileExplorer(Screen):
         elif action_type == "info":
             self.showFileInfo()
 
-    def deleteFile(self):
-        """Obriši selektovani fajl"""
+    def toggleMultiSelect(self):
+        """Uključi/isključi multi-selection mode"""
+        self.multi_select_mode = not self.multi_select_mode
+
+        if self.multi_select_mode:
+            self["status"].setText("MULTI-SELECT: ON (OK=select, BLUE=delete all)")
+            self.selected_files.clear()
+        else:
+            self["status"].setText("MULTI-SELECT: OFF")
+            self.selected_files.clear()
+
+        self.updateFileListDisplay()
+
+    def toggleSelection(self):
+        """Selektuj/odselektuj fajl u multi-selection modu"""
         selected_idx = self["files"].getSelectedIndex()
 
         if not self.file_list or selected_idx >= len(self.file_list):
-            self["status"].setText("No file selected!")
             return
 
-        file_info = self.file_list[selected_idx]
-        filename = file_info['name']
-        filepath = file_info['path']
+        if self.multi_select_mode:
+            file_path = self.file_list[selected_idx]['path']
 
-        # Potvrda brisanja
-        self.session.openWithCallback(
-            lambda confirm: self.confirmDelete(confirm, filepath, filename, selected_idx),
-            MessageBox,
-            f"Delete file '{filename}'?\n\nSize: {self.format_size(file_info['size'])}\nDate: {file_info['date']}",
-            MessageBox.TYPE_YESNO
-        )
+            if file_path in self.selected_files:
+                self.selected_files.remove(file_path)
+            else:
+                self.selected_files.add(file_path)
+
+            self.updateFileListDisplay()
+
+            # Prikaži broj selektovanih fajlova
+            selected_count = len(self.selected_files)
+            self["status"].setText(f"Multi-select: {selected_count} files selected")
+        else:
+            # Originalno ponašanje - prikaži opcije
+            self.selectFile()
+
+    def updateFileListDisplay(self):
+        """Ažuriraj prikaz fajlova sa selektovanim oznakama"""
+        if not self.file_list:
+            return
+
+        list_items = []
+
+        for idx, file_info in enumerate(self.file_list):
+            filename = file_info['name']
+            display_name = filename
+            if len(filename) > 80:
+                name, ext = os.path.splitext(filename)
+                display_name = name[:37] + "..." + ext
+
+            # Dodaj oznaku za selektovane fajlove
+            prefix = ""
+            if self.multi_select_mode:
+                if file_info['path'] in self.selected_files:
+                    prefix = "✓ "  # Checkmark za selektovano
+                else:
+                    prefix = "  "  # Prazno mesto
+
+            # Formatiraj prikaz
+            display_text = f"{prefix}{display_name}"
+            display_text += f" ({self.format_size(file_info['size'])}, {file_info['date']})"
+
+            list_items.append(display_text)
+
+        self["files"].setList(list_items)
+
+    def confirmMultiDelete(self, confirmed):
+        """Potvrdi brisanje više fajlova"""
+        if not confirmed:
+            self["status"].setText("Multi-delete cancelled")
+            return
+
+        deleted_count = 0
+        errors = []
+
+        for file_path in list(self.selected_files):  # Koristimo list() da napravimo kopiju
+            try:
+                import os
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    deleted_count += 1
+
+                    # Ukloni iz file_list
+                    self.file_list = [f for f in self.file_list if f['path'] != file_path]
+            except Exception as e:
+                errors.append(f"Error deleting {os.path.basename(file_path)}: {str(e)[:30]}")
+
+        # Resetuj selektciju
+        self.selected_files.clear()
+        self.multi_select_mode = False
+
+        # Refresh prikaz
+        self.refreshFiles()
+
+        # Prikaži rezultat
+        if deleted_count > 0:
+            self["status"].setText(f"Deleted {deleted_count} files")
+
+            msg = f"Successfully deleted {deleted_count} file(s)"
+            if errors:
+                msg += f"\n\nErrors: {len(errors)} file(s) failed"
+                for error in errors[:3]:
+                    msg += f"\n• {error}"
+                if len(errors) > 3:
+                    msg += f"\n• ... and {len(errors) - 3} more"
+
+            self.session.open(
+                MessageBox,
+                msg,
+                MessageBox.TYPE_INFO if not errors else MessageBox.TYPE_WARNING,
+                timeout=5
+            )
+        else:
+            self["status"].setText("No files deleted")
+
+    def deleteFile(self):
+        """Obriši fajl/fajlove - podržava multi-selection"""
+        if self.multi_select_mode and self.selected_files:
+            # Brisanje više fajlova
+            selected_count = len(self.selected_files)
+
+            # Potvrda
+            self.session.openWithCallback(
+                lambda confirm: self.confirmMultiDelete(confirm),
+                MessageBox,
+                f"Delete {selected_count} selected files?\n\nThis cannot be undone!",
+                MessageBox.TYPE_YESNO
+            )
+        else:
+            # Originalno ponašanje - brisanje jednog fajla
+            selected_idx = self["files"].getSelectedIndex()
+
+            if not self.file_list or selected_idx >= len(self.file_list):
+                self["status"].setText("No file selected!")
+                return
+
+            file_info = self.file_list[selected_idx]
+            filename = file_info['name']
+            filepath = file_info['path']
+
+            # Potvrda brisanja
+            self.session.openWithCallback(
+                lambda confirm: self.confirmDelete(confirm, filepath, filename, selected_idx),
+                MessageBox,
+                f"Delete file '{filename}'?\n\nSize: {self.format_size(file_info['size'])}\nDate: {file_info['date']}",
+                MessageBox.TYPE_YESNO
+            )
 
     def confirmDelete(self, confirmed, filepath, filename, index):
         """Potvrdi brisanje fajla"""
@@ -5341,19 +5753,19 @@ PREVIEW:
 
 class OpenSubtitlesMainScreen(Screen):
     skin = """
-    <screen name="CiefpOpenSubtitlesMain" position="center,center" size="1600,800" title="Ciefp Subtitles v1.3" backgroundColor="#000000">
+    <screen name="CiefpOpenSubtitlesMain" position="center,center" size="1600,800" title="Ciefp Subtitles v1.4" backgroundColor="#000000">
         <eLabel position="0,0" size="1920,1080" backgroundColor="#000000" zPosition="-15" />
         <eLabel position="center,center" size="1200,800" backgroundColor="#101010" zPosition="-10" />
         
         <widget name="background" position="1200,10" size="400,800" pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpOpenSubtitles/background.png" />
         <widget name="title" position="0,40" size="1200,80" font="Regular;42" foregroundColor="#ffffff" backgroundColor="transparent" halign="center" valign="center" transparent="1" zPosition="1" />
 
-        <widget name="menu" position="100,140" size="1000,550" itemHeight="60" font="Regular;34" foregroundColor="#ffffff" backgroundColor="transparent" scrollbarMode="showOnDemand" enableWrapAround="1" transparent="1" zPosition="1" />
+        <widget name="menu" position="100,140" size="1000,540" itemHeight="45" font="Regular;32" foregroundColor="#ffffff" backgroundColor="transparent" scrollbarMode="showOnDemand" enableWrapAround="1" transparent="1" zPosition="1" />
 
-        <eLabel text="Exit" position="100,e-100" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#9f1313" halign="center" valign="center" zPosition="1" />
-        <eLabel text="Help" position="380,e-100" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#1f771f" halign="center" valign="center" zPosition="1" />
-        <eLabel text="Refresh" position="660,e-100" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#a08500" halign="center" valign="center" zPosition="1" />
-        <eLabel text="Select" position="940,e-100" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#18188b" halign="center" valign="center" zPosition="1" />
+        <eLabel text="Exit" position="100,e-80" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#9f1313" halign="center" valign="center" zPosition="1" />
+        <eLabel text="Help" position="380,e-80" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#1f771f" halign="center" valign="center" zPosition="1" />
+        <eLabel text="Refresh" position="660,e-80" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#a08500" halign="center" valign="center" zPosition="1" />
+        <eLabel text="Select" position="940,e-80" size="250,60" font="Regular;30" foregroundColor="#ffffff" backgroundColor="#18188b" halign="center" valign="center" zPosition="1" />
     </screen>
     """
     def __init__(self, session, plugin):
@@ -5367,12 +5779,13 @@ class OpenSubtitlesMainScreen(Screen):
             ("Smart Search (All methods)", "search_smart"),
             ("Advanced Search (SubDL)", "search_advanced"),
             ("Titlovi.com Basic", "search_titlovi"),
-            ("Titlovi.com Advanced", "search_titlovi_advanced"),  # DODATO
+            ("Titlovi.com Advanced", "search_titlovi_advanced"),
             ("Search Series", "search_series"),
             ("File Explorer", "file_explorer"),
             ("Configuration", "config"),
             ("API Keys Setup", "api_keys"),
-            ("About v1.3", "about"),
+            ("Clear Debug Files", "clear_debug"),  # NOVO
+            ("About v1.4", "about"),
             ("Exit", "exit")
         ]
         self["menu"] = MenuList([])
@@ -5414,7 +5827,7 @@ class OpenSubtitlesMainScreen(Screen):
         self["key_yellow"] = StaticText("Refresh")
         self["key_blue"] = StaticText("Select")
         
-        self["title"] = Label("Ciefp Subtitles v1.3")
+        self["title"] = Label("Ciefp Subtitles v1.4")
         
         self["actions"] = ActionMap(["ColorActions", "SetupActions"],
         {
@@ -5426,10 +5839,61 @@ class OpenSubtitlesMainScreen(Screen):
             "ok": self.selectItem,
         }, -2)
 
+    def clearDebugFiles(self):
+        """Brisanje debug fajlova iz main menija"""
+        try:
+            import glob, os
+
+            # Pronađi sve debug fajlove
+            patterns = [
+                "/tmp/titlovi_*.html",
+                "/tmp/subdl_*.html",
+                "/tmp/opensubtitles_*.html"
+            ]
+
+            debug_files = []
+            for pattern in patterns:
+                debug_files.extend(glob.glob(pattern))
+
+            if not debug_files:
+                self.session.open(MessageBox,
+                                  "No debug files found!",
+                                  MessageBox.TYPE_INFO)
+                return
+
+            # Pitaj za potvrdu
+            self.session.openWithCallback(
+                lambda confirm: self.doClearDebugFiles(confirm, debug_files),
+                MessageBox,
+                f"Delete {len(debug_files)} debug files?\n\nThis will clear all temporary HTML files.",
+                MessageBox.TYPE_YESNO
+            )
+
+        except Exception as e:
+            self.session.open(MessageBox,
+                              f"Error: {str(e)}",
+                              MessageBox.TYPE_ERROR)
+
+    def doClearDebugFiles(self, confirmed, debug_files):
+        if not confirmed:
+            return
+
+        deleted_count = 0
+        for f in debug_files:
+            try:
+                os.remove(f)
+                deleted_count += 1
+            except:
+                pass
+
+        self.session.open(MessageBox,
+                          f"Cleared {deleted_count} debug files!",
+                          MessageBox.TYPE_INFO)
+
     def keyGreen(self):
         """Zeleno dugme - Help za sve tri pretrage"""
         
-        help_text = f"""Ciefp Subtitles v1.3
+        help_text = f"""Ciefp Subtitles v1.4
 1.STANDARD SEARCH:
    • Uses Film Name only
 
@@ -5474,6 +5938,8 @@ class OpenSubtitlesMainScreen(Screen):
                 icon = "⚙️ "
             elif "API" in item[0]:
                 icon = "🔑 "
+            elif "Clear Debug" in item[0]:
+                icon = "🗑️ "
             elif "About" in item[0]:
                 icon = "ℹ️ "
             elif "Exit" in item[0]:
@@ -5506,6 +5972,8 @@ class OpenSubtitlesMainScreen(Screen):
                 self.session.open(OpenSubtitlesConfigScreen, self.plugin)
             elif action == "api_keys":
                 self.session.open(OpenSubtitlesApiKeysScreen, self.plugin)
+            elif action == "clear_debug":
+                self.clearDebugFiles()
             elif action == "about":
                 about_text = f"""Ciefp Subtitles Plugin
 1. Standard Search (Film Name)
